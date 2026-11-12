@@ -131,3 +131,18 @@ test('bad input is refused with a code', () => {
   assert.throws(() => planWorkout(base(), { ...chosen(), exercises: [{ exerciseId: 'nope', sets: [{ reps: 1 }] }] }), e => e.code === 'unknown_exercise')
   assert.throws(() => planWorkout(base(), { ...chosen(), exercises: [{ exercise: 'x', remember: true, sets: [{ reps: 1 }] }] }), e => e.code === 'invalid_input')
 })
+
+test('client reads the saved token on every request, so a restart before the server is up still authenticates', async () => {
+  const fs = await import('node:fs'), os = await import('node:os'), path = await import('node:path')
+  const { createClient } = await import('../src/client.js')
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-token-'))
+  const tokenFile = path.join(dir, 'token.json')
+  fs.writeFileSync(tokenFile, JSON.stringify({ token: 'saved-token' }))
+  const seen = []
+  const fetchImpl = async (url, init) => { seen.push(init.headers.Authorization); return new Response(JSON.stringify({ state: { unit: 'kg' }, rev: 3 }), { status: 200 }) }
+  const client = createClient({ baseUrl: 'http://og', tokenFile, fetchImpl })
+  const r = await client.read()
+  assert.equal(r.rev, 3)
+  assert.deepEqual(seen, ['Bearer saved-token'])
+  fs.rmSync(dir, { recursive: true, force: true })
+})

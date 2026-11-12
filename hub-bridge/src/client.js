@@ -27,6 +27,8 @@ export function createClient({ baseUrl, tokenFile, pairCode = '', fetchImpl = fe
   }
 
   async function request(method, p, body, { auth = true } = {}) {
+    // 重启后令牌只在文件里：每次请求前补读，不依赖启动时那次 ensureAuth 成功。
+    if (auth && !token) loadToken()
     const ctl = new AbortController()
     const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS)
     let res

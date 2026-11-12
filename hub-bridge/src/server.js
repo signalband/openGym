@@ -90,8 +90,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   })
   const port = Number(process.env.PORT) || 8787
   createApp({ client, bridgeToken: process.env.BRIDGE_TOKEN }).listen(port, () => console.log(`[hub-bridge] listening on :${port}`))
-  // 不阻塞启动：配对失败时 /health 报 paired:false，写请求返回 not_paired。
-  client.ensureAuth().then(u => console.log(`[hub-bridge] paired as profile ${u.name}`)).catch(e => console.error('[hub-bridge] auth:', e.message))
+  // 不阻塞启动：服务端可能和 bridge 同时重启、还没起来，失败就每 10 秒再试，直到成功。
+  const firstAuth = () => client.ensureAuth()
+    .then(u => console.log(`[hub-bridge] paired as profile ${u.name}`))
+    .catch(e => { console.error('[hub-bridge] auth:', e.message); setTimeout(firstAuth, 10000).unref() })
+  firstAuth()
   // 令牌有效期默认 90 天，过半时 /api/me 换新；每天问一次就不会过期。
   setInterval(() => client.ensureAuth().catch(e => console.error('[hub-bridge] auth:', e.message)), 24 * 3600 * 1000).unref()
 }
