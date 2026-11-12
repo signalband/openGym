@@ -1,0 +1,46 @@
+# openGym 服务端 + hub-bridge，接到 Health Hub 已有的 Docker 网络上（反向代理和 Hub 都在那个网络里）。
+# 网页前端不部署：手机 App 自带界面，只需要服务端。
+#   docker compose -p opengym -f compose.yml up -d --build
+name: opengym
+
+services:
+  api:
+    build:
+      context: ./src/api
+    restart: unless-stopped
+    environment:
+      - PORT=3000
+      - DATA_DIR=/data
+      - TRUST_PROXY=1
+      - RP_ID=gym.example.com
+      - ORIGIN=https://gym.example.com
+      - PASSWORD_LOGIN=1          # 手机 App 里不能用 passkey，账号和配对码靠密码登录生成
+      - INVITE_ONLY=1             # 只有自己用：注册要邀请码
+    volumes:
+      - ./data:/data              # 用户、会话密钥、每人的训练数据——要备份
+    mem_limit: 256m
+    networks:
+      default:
+        aliases: [opengym-api]
+
+  bridge:
+    build:
+      context: ./src
+      dockerfile: hub-bridge/Dockerfile
+    restart: unless-stopped
+    env_file: ./private/bridge.env   # BRIDGE_TOKEN=…（与 Hub 共享）；首次配对时临时加 OPENGYM_PAIR_CODE=…
+    environment:
+      - OPENGYM_URL=http://opengym-api:3000
+      - TOKEN_FILE=/data/token.json
+    volumes:
+      - ./bridge-data:/data
+    mem_limit: 192m
+    depends_on: [api]
+    networks:
+      default:
+        aliases: [opengym-bridge]
+
+networks:
+  default:
+    name: fluxvita-health_default   # Hub 与反向代理所在的网络
+    external: true
