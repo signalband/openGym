@@ -11,7 +11,7 @@
 #   ANDROID_KEYSTORE_B64       base64 的 keystore（务必另有备份：换钥匙后已装的 App 无法覆盖更新）
 #   ANDROID_KEYSTORE_PASSWORD  keystore 与 key 的密码
 #   ANDROID_KEY_ALIAS          key 别名
-name: zh-overlay APK
+name: zh-overlay APK (原版 + 中文动作名)
 
 on:
   schedule:
