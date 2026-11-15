@@ -1,0 +1,164 @@
+# 原版 openGym + 中文动作名补丁 → 我们签名的 sideload APK。
+#
+# 不维护分叉：每次都从原版的发布 tag 干净检出，再套 scripts/zh-overlay/apply.sh（动作中文名 + App 内更新
+# 改查本仓库），测试通过才构建、签名、发 Release。原版出新版后第二天自动跟上；补丁对不上原版、或测试失败，
+# 这一轮就不发包，开一个 issue 说明。
+#
+# Release tag 是「原版版本 + zh」，如 v1.4.5+zh。App 的版本比较会忽略 + 后面的部分，所以只有原版版本号
+# 变大才算更新。
+#
+# 需要的 Secrets：
+#   ANDROID_KEYSTORE_B64       base64 的 keystore（务必另有备份：换钥匙后已装的 App 无法覆盖更新）
+#   ANDROID_KEYSTORE_PASSWORD  keystore 与 key 的密码
+#   ANDROID_KEY_ALIAS          key 别名
+name: zh-overlay APK
+
+on:
+  schedule:
+    - cron: '30 1 * * *'   # 北京时间 09:30
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '原版 tag（留空 = 原版最新 Release）'
+        required: false
+      force:
+        description: '已有同名 Release 也重新构建'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: zh-overlay
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: DuarteSantos8/openGym
+  NODE_VERSION: 26
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: 选定原版版本
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$(gh api "repos/$UPSTREAM/releases/latest" --jq .tag_name)}"
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "unexpected upstream tag: $TAG" >&2; exit 1 ;; esac
+          OURS="${TAG}+zh"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "ours=$OURS" >> "$GITHUB_OUTPUT"
+          if [ "$FORCE" != "true" ] && gh release view "$OURS" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "$OURS already released"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 检出原版
+        if: steps.pick.outputs.skip == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ steps.pick.outputs.tag }}
+          path: src
+
+      - name: 检出补丁
+        if: steps.pick.outputs.skip == 'false'
+        uses: actions/checkout@v4
+        with:
+          path: overlay
+          sparse-checkout: |
+            scripts/zh-overlay
+            hub-bridge
+
+      - name: 套补丁
+        if: steps.pick.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          cp -R overlay/scripts/zh-overlay src/scripts/
+          rm -rf src/hub-bridge && cp -R overlay/hub-bridge src/hub-bridge
+          UPDATE_REPO="$GITHUB_REPOSITORY" sh src/scripts/zh-overlay/apply.sh
+
+      - uses: actions/setup-node@v4
+        if: steps.pick.outputs.skip == 'false'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: 测试（frontend / api / hub-bridge）
+        if: steps.pick.outputs.skip == 'false'
+        working-directory: src
+        env:
+          TZ: Europe/Zurich
+        run: |
+          set -euo pipefail
+          (cd frontend && npm ci && npx vitest run --maxWorkers=2)
+          (cd api && npm ci && npm test)
+          (cd hub-bridge && node --test test/)
+          node scripts/catalogue/build.mjs --check
+
+      - uses: actions/setup-java@v4
+        if: steps.pick.outputs.skip == 'false'
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: 构建并签名 APK
+        if: steps.pick.outputs.skip == 'false'
+        working-directory: src
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          [ -n "$ANDROID_KEYSTORE_B64" ] || { echo "ANDROID_KEYSTORE_B64 is not set" >&2; exit 1; }
+          cd frontend
+          npm run build:mobile
+          VER="$(node -p "require('./package.json').version")"
+          cd android
+          ./gradlew --no-daemon assembleSideloadRelease --console=plain
+          UNSIGNED=app/build/outputs/apk/sideload/release/app-sideload-release-unsigned.apk
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          printf '%s' "$ANDROID_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/ks.jks"
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
+          OUT="$GITHUB_WORKSPACE/openGym-$VER.apk"
+          "$BT/apksigner" sign --ks "$RUNNER_TEMP/ks.jks" --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" --key-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --out "$OUT" "$RUNNER_TEMP/aligned.apk"
+          rm -f "$RUNNER_TEMP/ks.jks"
+          "$BT/apksigner" verify --print-certs "$OUT"
+          cd "$GITHUB_WORKSPACE" && sha256sum "openGym-$VER.apk" > "openGym-$VER.apk.sha256"
+          echo "VER=$VER" >> "$GITHUB_ENV"
+
+      - name: 发布 Release
+        if: steps.pick.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OURS: ${{ steps.pick.outputs.ours }}
+          TAG: ${{ steps.pick.outputs.tag }}
+        run: |
+          set -euo pipefail
+          NOTES="原版 openGym $TAG（https://github.com/$UPSTREAM/releases/tag/$TAG）+ 简体中文动作名审校补丁。
+
+          动作名来源：daoshi818-crypto/openGym 的中文动作名审校（AGPL-3.0-or-later）。
+          与原版冲突、保留原版写法的条目见 scripts/zh-overlay/conflicts.json。"
+          gh release delete "$OURS" -R "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$OURS" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "openGym $VER（中文动作名）" \
+            --notes "$NOTES" "openGym-$VER.apk" "openGym-$VER.apk.sha256"
+
+      - name: 失败时开 issue
+        if: failure() && steps.pick.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.pick.outputs.tag }}
+        run: |
+          gh issue create -R "$GITHUB_REPOSITORY" --title "zh-overlay：原版 $TAG 构建失败" \
+            --body "运行记录：$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID 。补丁对不上原版或测试失败，这一版没有发布 APK。"

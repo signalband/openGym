@@ -1,0 +1,13 @@
+{
+  "name": "opengym-hub-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Internal HTTP bridge that lets a health hub log workouts and routines into an openGym profile through the server's own sync API.",
+  "license": "AGPL-3.0-or-later",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/"
+  }
+}
